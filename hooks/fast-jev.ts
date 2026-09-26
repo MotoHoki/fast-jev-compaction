@@ -261,6 +261,22 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let compacting = false;
 
   on('session.compact', async ($, event, next) => {
+    // Ask before anything leaves the machine; dismissing the dialog sends nothing.
+    const USE_JEV = 'Jev を使う';
+    const SKIP_JEV = '使わない（Claude の標準の要約）';
+    let choice = '';
+    try {
+      choice = await $.ui.ask('Jev（TypeSafe・米国）に会話を送って compact しますか？', {
+        options: [SKIP_JEV, USE_JEV],
+        header: 'Jev',
+      });
+    } catch {
+      choice = '';
+    }
+    if (choice !== USE_JEV) {
+      notify($, 'fallback to built-in summary (Jev not used: user chose not to send)');
+      return next(event);
+    }
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
