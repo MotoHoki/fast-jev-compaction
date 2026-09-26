@@ -238,24 +238,19 @@ export function auditLine(at: number, sessionId: string, text: string): string {
   return `${new Date(at).toISOString()} session=${sessionId} ${text}`;
 }
 
-/** The slice of `$.fs` the audit trail needs. */
-export type AuditFs = {
-  exists: (path: string) => Promise<boolean>;
-  read: (path: string) => Promise<string>;
-  write: (path: string, text: string) => Promise<void>;
-};
-
-/** Appends `line`, keeping the newest `maxLines`, since `$.fs` has no append. */
-export async function appendAudit(
-  fs: AuditFs,
-  path: string,
+/**
+ * The whole file with `line` appended, keeping the newest `maxLines`, since
+ * `$.fs` has no append. Pure: the engine forbids passing `$.fs` as a value, so
+ * the reads and the write stay at the call site in `audit`.
+ */
+export function appendAuditText(
+  existing: string,
   line: string,
   maxLines: number = AUDIT_MAX_LINES,
-): Promise<void> {
-  const existing = (await fs.exists(path)) ? await fs.read(path) : '';
+): string {
   const lines = existing.split('\n').filter(Boolean);
   lines.push(line);
-  await fs.write(path, `${lines.slice(-maxLines).join('\n')}\n`);
+  return `${lines.slice(-maxLines).join('\n')}\n`;
 }
 
 /** Records one line; an audit trail must never break a compaction. */
@@ -263,7 +258,11 @@ async function audit(
   $: {
     clock: { now: () => Promise<number> };
     env: { get: (name: string) => Promise<string | undefined> };
-    fs: AuditFs;
+    fs: {
+      exists: (path: string) => Promise<boolean>;
+      read: (path: string) => Promise<string>;
+      write: (path: string, text: string) => Promise<void>;
+    };
     session: { id: () => Promise<string> };
   },
   text: string,
@@ -272,7 +271,9 @@ async function audit(
     const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'));
     if (!home) return;
     const [at, sessionId] = await Promise.all([$.clock.now(), $.session.id()]);
-    await appendAudit($.fs, `${home.replace(/[\\/]+$/, '')}/${AUDIT_LOG_PATH}`, auditLine(at, sessionId, text));
+    const path = `${home.replace(/[\\/]+$/, '')}/${AUDIT_LOG_PATH}`;
+    const existing = (await $.fs.exists(path)) ? await $.fs.read(path) : '';
+    await $.fs.write(path, appendAuditText(existing, auditLine(at, sessionId, text)));
   } catch {
     // A failed write must not stop the compaction; the toast still reports it.
   }
