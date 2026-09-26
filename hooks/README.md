@@ -74,6 +74,30 @@ reduction, per-reason counts, state size and request count; a per-call
 compaction when `context.percent` reaches `compactAtPercent`, with an
 in-flight guard.
 
+## Asking before sending, and the audit log
+
+`session.compact` asks before anything leaves the machine. Choosing anything
+other than "Jev を使う" — the other option, a dismissed dialog, or a dialog that
+fails to render — sends nothing: the hook reports a fallback and delegates to
+the built-in compaction without reaching the Jev request.
+
+Because `$.ui.log` lines and toasts are not part of the transcript, the choice
+and the outcome are also appended to `.claude/fast-jev-compaction.log` under the
+user's home directory, one line each:
+
+```
+2026-09-26T10:13:22.000Z session=<id> decision=skip consent=no messages=42
+2026-09-26T10:13:22.010Z session=<id> outcome=fallback to built-in summary (Jev not used: user chose not to send) sent=0
+```
+
+`consent=` is what the user chose; `sent=` is how many requests actually reached
+`$.http.fetch`, counted at the call, so consenting is never recorded as sending
+and a missing key (which throws first) stays `sent=0`. `grep -E "sent=[1-9]"`
+over that file answers, after the fact, whether a session ever sent a transcript
+to Jev — which a toast alone cannot, since nothing keeps it. The log holds
+conversation content never, nor the key; it keeps its newest 2000 lines. A failed
+write is swallowed so it can never break a compaction.
+
 ## Scope and caveat
 
 Function hooks are early access and may change between Claude Code releases.

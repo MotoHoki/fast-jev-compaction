@@ -224,6 +224,60 @@ export function decisionLogLines(
   );
 }
 
+/** Where the audit trail lives, under the user's home directory. */
+export const AUDIT_LOG_PATH = '.claude/fast-jev-compaction.log';
+
+const AUDIT_MAX_LINES = 2000;
+
+/**
+ * One audit line: when, which session, what happened. Never conversation text,
+ * never the key — the point is to answer "was anything sent?" after the fact,
+ * because `$.ui.log` lines and toasts are not part of the transcript.
+ */
+export function auditLine(at: number, sessionId: string, text: string): string {
+  return `${new Date(at).toISOString()} session=${sessionId} ${text}`;
+}
+
+/** The slice of `$.fs` the audit trail needs. */
+export type AuditFs = {
+  exists: (path: string) => Promise<boolean>;
+  read: (path: string) => Promise<string>;
+  write: (path: string, text: string) => Promise<void>;
+};
+
+/** Appends `line`, keeping the newest `maxLines`, since `$.fs` has no append. */
+export async function appendAudit(
+  fs: AuditFs,
+  path: string,
+  line: string,
+  maxLines: number = AUDIT_MAX_LINES,
+): Promise<void> {
+  const existing = (await fs.exists(path)) ? await fs.read(path) : '';
+  const lines = existing.split('\n').filter(Boolean);
+  lines.push(line);
+  await fs.write(path, `${lines.slice(-maxLines).join('\n')}\n`);
+}
+
+/** Records one line; an audit trail must never break a compaction. */
+async function audit(
+  $: {
+    clock: { now: () => Promise<number> };
+    env: { get: (name: string) => Promise<string | undefined> };
+    fs: AuditFs;
+    session: { id: () => Promise<string> };
+  },
+  text: string,
+): Promise<void> {
+  try {
+    const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'));
+    if (!home) return;
+    const [at, sessionId] = await Promise.all([$.clock.now(), $.session.id()]);
+    await appendAudit($.fs, `${home.replace(/[\\/]+$/, '')}/${AUDIT_LOG_PATH}`, auditLine(at, sessionId, text));
+  } catch {
+    // A failed write must not stop the compaction; the toast still reports it.
+  }
+}
+
 async function getApiKey(
   $: {
     env: { get: (name: string) => Promise<string | undefined> };
@@ -273,32 +327,40 @@ export const register: Register = (on: On, options: PluginOptions) => {
     } catch {
       choice = '';
     }
+    // Counted at the fetch itself, so the audit log reports requests that really
+    // went out — consenting is not sending, and a missing key throws before any.
+    let sent = 0;
+    // Toasts are not kept anywhere, so every outcome also goes to the audit log.
+    const report = async (text: string): Promise<void> => {
+      notify($, text);
+      await audit($, `outcome=${text} sent=${sent}`);
+    };
     if (choice !== USE_JEV) {
-      notify($, 'fallback to built-in summary (Jev not used: user chose not to send)');
+      await audit($, `decision=skip consent=no messages=${event.messages.length}`);
+      await report('fallback to built-in summary (Jev not used: user chose not to send)');
       return next(event);
     }
+    await audit($, `decision=use consent=yes messages=${event.messages.length}`);
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
+        sent += 1;
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };
       });
       for (const line of decisionLogLines(result)) $.ui.log(line);
       if (reductionRatio(result) < config.minReductionRatio) {
-        notify(
-          $,
+        await report(
           `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
         );
         return next(event);
       }
-      notify(
-        $,
+      await report(
         `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`,
       );
       return { messages };
     } catch (error) {
-      notify(
-        $,
+      await report(
         `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`,
       );
       return next(event);

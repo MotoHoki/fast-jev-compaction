@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  appendAudit,
+  auditLine,
+  type AuditFs,
   compactSession,
   decisionLog,
   decisionLogLines,
@@ -145,5 +148,47 @@ describe('compactSession', () => {
     await expect(
       compactSession(transcript(), { ...config, apiKey: 'k' }, async () => ({ status: 500, ok: false, text: 'x' })),
     ).rejects.toThrow(/500/);
+  });
+});
+
+describe('audit trail', () => {
+  function fakeFs(initial?: string): AuditFs & { text: string | undefined } {
+    return {
+      text: initial,
+      async exists(_path: string) {
+        return this.text !== undefined;
+      },
+      async read(_path: string) {
+        if (this.text === undefined) throw new Error('ENOENT');
+        return this.text;
+      },
+      async write(_path: string, text: string) {
+        this.text = text;
+      },
+    };
+  }
+
+  it('stamps a line with the time and session, and nothing else', () => {
+    expect(auditLine(Date.UTC(2026, 8, 26, 10, 13, 22), 'abc-123', 'decision=skip sent=no')).toBe(
+      '2026-09-26T10:13:22.000Z session=abc-123 decision=skip sent=no',
+    );
+  });
+
+  it('creates the log on the first write', async () => {
+    const fs = fakeFs();
+    await appendAudit(fs, 'x.log', 'first');
+    expect(fs.text).toBe('first\n');
+  });
+
+  it('appends to an existing log without rereading it as one line', async () => {
+    const fs = fakeFs('first\n');
+    await appendAudit(fs, 'x.log', 'second');
+    expect(fs.text).toBe('first\nsecond\n');
+  });
+
+  it('keeps only the newest lines so the log cannot grow without bound', async () => {
+    const fs = fakeFs('a\nb\nc\n');
+    await appendAudit(fs, 'x.log', 'd', 2);
+    expect(fs.text).toBe('c\nd\n');
   });
 });
