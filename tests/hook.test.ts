@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendAuditText,
+  askField,
   auditLine,
   compactSession,
   decisionLog,
@@ -167,5 +168,22 @@ describe('audit trail', () => {
 
   it('keeps only the newest lines so the log cannot grow without bound', () => {
     expect(appendAuditText('a\nb\nc\n', 'd', 2)).toBe('c\nd\n');
+  });
+});
+
+describe('ask diagnostics', () => {
+  it('records the label an ask resolved to, quoted so an empty one is visible', () => {
+    expect(askField({ ok: true, choice: 'Jev を使う' }, 4210)).toBe('returned="Jev を使う" askMs=4210');
+    expect(askField({ ok: true, choice: '' }, 3)).toBe('returned="" askMs=3');
+  });
+
+  it('records why an ask rejected, by name and message, on one line', () => {
+    expect(askField({ ok: false, error: new TypeError('no one to ask') }, 2)).toBe(
+      'threw="TypeError: no one to ask" askMs=2',
+    );
+  });
+
+  it('records a rejection that is not an Error at all', () => {
+    expect(askField({ ok: false, error: 'dismissed' }, 17)).toBe('threw="dismissed" askMs=17');
   });
 });

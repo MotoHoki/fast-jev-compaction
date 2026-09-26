@@ -253,6 +253,26 @@ export function appendAuditText(
   return `${lines.slice(-maxLines).join('\n')}\n`;
 }
 
+/** What one `$.ui.ask` did: the label it resolved to, or why it did not. */
+export type AskOutcome = { ok: true; choice: string } | { ok: false; error: unknown };
+
+/**
+ * One audit field for an ask: what came back, and how long it took. The
+ * duration is the tell — a dialog a person answered takes seconds, one the
+ * engine never drew comes back at once — so "nobody chose" and "nobody was
+ * asked" stop looking alike in the log.
+ */
+export function askField(outcome: AskOutcome, ms: number): string {
+  const what = outcome.ok
+    ? `returned=${JSON.stringify(outcome.choice)}`
+    : `threw=${JSON.stringify(
+        outcome.error instanceof Error
+          ? `${outcome.error.name}: ${outcome.error.message}`
+          : String(outcome.error),
+      )}`;
+  return `${what} askMs=${ms}`;
+}
+
 /** Records one line; an audit trail must never break a compaction. */
 async function audit(
   $: {
@@ -319,15 +339,23 @@ export const register: Register = (on: On, options: PluginOptions) => {
     // Ask before anything leaves the machine; dismissing the dialog sends nothing.
     const USE_JEV = 'Jev を使う';
     const SKIP_JEV = '使わない（Claude の標準の要約）';
-    let choice = '';
+    let outcome: AskOutcome;
+    const askedAt = await $.clock.now();
     try {
-      choice = await $.ui.ask('Jev（TypeSafe・米国）に会話を送って compact しますか？', {
-        options: [SKIP_JEV, USE_JEV],
-        header: 'Jev',
-      });
-    } catch {
-      choice = '';
+      outcome = {
+        ok: true,
+        choice: await $.ui.ask('Jev（TypeSafe・米国）に会話を送って compact しますか？', {
+          options: [SKIP_JEV, USE_JEV],
+          header: 'Jev',
+        }),
+      };
+    } catch (error) {
+      outcome = { ok: false, error };
     }
+    // Why the dialog did or did not happen, for the decision lines below: an ask
+    // nobody could answer and an ask nobody chose in both leave `choice` unusable.
+    const asked = askField(outcome, (await $.clock.now()) - askedAt);
+    const choice = outcome.ok ? outcome.choice : '';
     // Counted at the fetch itself, so the audit log reports requests that really
     // went out — consenting is not sending, and a missing key throws before any.
     let sent = 0;
@@ -337,11 +365,17 @@ export const register: Register = (on: On, options: PluginOptions) => {
       await audit($, `outcome=${text} sent=${sent}`);
     };
     if (choice !== USE_JEV) {
-      await audit($, `decision=skip consent=no messages=${event.messages.length}`);
+      await audit(
+        $,
+        `decision=skip consent=no trigger=${event.trigger} ${asked} messages=${event.messages.length}`,
+      );
       await report('fallback to built-in summary (Jev not used: user chose not to send)');
       return next(event);
     }
-    await audit($, `decision=use consent=yes messages=${event.messages.length}`);
+    await audit(
+      $,
+      `decision=use consent=yes trigger=${event.trigger} ${asked} messages=${event.messages.length}`,
+    );
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
